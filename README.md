@@ -26,7 +26,7 @@ This documents describe the demo setup of Analog Device two camera pill anormly 
 ## Prepare
 
 1. Clone [picamera2](https://github.com/raspberrypi/picamera2)
-1. Create a folder named "demo" in picamera2/example/ADI
+1. Create a folder named "ADI" in picamera2/example
 2. Create a folder named "Detection" in picamera2/examples/ADI/Models/, copy your pill detection ai model(network.rpk) and labels(labels.txt) into this folder. 
 3. Create a folder named "Anomaly" in picamera2/examples/ADI/Models/, copy your pill anomaly detection ai model(network.rpk) into this folder.
 4. Put this repo into folder picamera2/example/ADI
