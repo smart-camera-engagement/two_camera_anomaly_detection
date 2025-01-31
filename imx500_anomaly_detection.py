@@ -3,12 +3,13 @@ Description   : This script designed to perform pill anormly detection
 Author        : Fang Du
 Email         : fang.du@sony.com
 Date Created  : 2025-01-30
-Date Modified : 2025-01-30
-Version       : 1.0
+Date Modified : 2025-01-31
+Version       : 1.1
 Python Version: 3.11
 License       : © 2025 - Sony Semiconductor Solution America
 History       :
               : 1.0 - 2025-1-30 Create Script
+              : 1.1 - 2025-1-31 Modified to three-frame cycle
 """
 
 import time
@@ -40,8 +41,8 @@ class IMX500AnomalyDetector:
         self.picam2 = Picamera2(self.imx500.camera_num)
         self._setup_camera(args)
 
-        # Toggle and tracking state
-        self.is_detection_frame = False
+        # Frame cycle state(0: set ROI, 1: wait, 2: get results)
+        self.frame_state = 0
         self.current_bbox_id = None
         self.processed_bbox_ids = set()
 
@@ -149,12 +150,11 @@ class IMX500AnomalyDetector:
     def process_frame(self, request: CompletedRequest, bbox_queue, results_queue) -> None:
         """Process each frame, alternating between bbox setup and anomaly detection."""
         try:
-            if not self.is_detection_frame:
+            if self.frame_state == 0: # set ROI
                 # Frame for getting bbox
                 if not bbox_queue.empty():
                     bbox = bbox_queue.get()
                     bbox_id = bbox["id"]
-
                     # Skip if already processed
                     if bbox_id not in self.processed_bbox_ids:
                         scaled_bbox = self.scale_bbox_to_detection(
@@ -166,24 +166,11 @@ class IMX500AnomalyDetector:
                         self.current_bbox_id = bbox_id
                     else:
                         print(f"Skipping already processed bbox ID: {bbox_id}")
-                # save this code for testing
-                # else:
-                #     bbox = {
-                #         'x': 200,
-                #         'y': 150,
-                #         'w': 256,
-                #         'h': 256,
-                #         'id': 1
-                #     }
-                #     bbox_id = bbox["id"]
-                #     scaled_bbox = self.scale_bbox_to_detection(
-                #             (bbox['x'], bbox['y'], bbox['w'], bbox['h']),
-                #             scale_x=6.3375,
-                #             scale_y=6.3333
-                #         )
-                #     self.imx500.set_inference_roi_abs(scaled_bbox)
-                #     self.current_bbox_id = bbox_id
-            else:
+
+            elif self.frame_state == 1:  # wait
+                pass
+
+            else: # get result
                 # Frame for anomaly detection
                 if self.current_bbox_id is not None:
                     results = self.process_anomaly_results(request)
@@ -203,7 +190,7 @@ class IMX500AnomalyDetector:
                         self.current_bbox_id = None
 
             # Toggle frame type
-            self.is_detection_frame = not self.is_detection_frame
+            self.frame_state = (self.frame_state + 1) % 3
             
         except Exception as e:
             print(f"Error in process_frame: {e}")
