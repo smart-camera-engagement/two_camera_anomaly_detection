@@ -4,11 +4,13 @@ Author        : Fang Du
 Email         : fang.du@sony.com
 Date Created  : 2025-01-30
 Date Modified : 2025-01-30
-Version       : 1.0
+Version       : 1.1
 Python Version: 3.11
 License       : © 2025 - Sony Semiconductor Solution America
 History       :
-              : 1.0 - 2025-1-30 Create Script
+              : 1.0 - 2025-01-30 Create Script
+              : 1.1 - 2025-02-02 Add detection region
+
 """
 
 import time
@@ -25,7 +27,6 @@ from picamera2.devices.imx500 import (NetworkIntrinsics,
 
 @dataclass
 class Detection:
-    """Detection object containing bounding box and classification info."""
     category: int
     conf: float
     box: List[int]
@@ -39,22 +40,19 @@ class Detection:
 
 class IMX500Detector:
     def __init__(self, args):
-        """Initialize IMX500 detector with configuration."""
         self.camera_path = self._select_camera(args.camera_index)
         self.imx500 = IMX500(network_file=args.model, camera_id=self.camera_path)
         self.intrinsics = self.imx500.network_intrinsics
         if not self.intrinsics:
             self.intrinsics = NetworkIntrinsics()
             self.intrinsics.task = "object detection"
-        
-        # Initialize SORT tracker
+
         self.tracker = Sort(
             max_age=args.max_disappeared,
             min_hits=3,
             iou_threshold=args.iou
         )
         
-        # Configure detector
         self._configure_intrinsics(args)
         self._setup_camera(args)
         self.last_results = None
@@ -70,6 +68,8 @@ class IMX500Detector:
         self.conveyor_speed = 0.0    # Current estimated conveyor speed
         self.speed_history = []
         self.history_window = 10     # Number of frames to average speed over
+
+        self.detection_region = args.detection_region
 
     def estimate_conveyor_speed(self, detections: List[Detection], current_time: float) -> None:
         dt = current_time - self.prev_time
@@ -101,6 +101,11 @@ class IMX500Detector:
     def _get_center(self, box: List[int]) -> Tuple[float, float]:
         x, y, w, h = box
         return (x + w/2, y + h/2)
+    
+    def _is_point_in_region(self, point: Tuple[float, float], region: List[int]) -> bool:
+        x, y = point
+        rx, ry, rw, rh = region
+        return (rx <= x <= rx + rw) and (ry <= y <= ry + rh)
         
     def cleanup_tracking(self) -> None:
         """Remove tracking data for objects that are no longer visible."""
@@ -136,8 +141,6 @@ class IMX500Detector:
         return cameras[camera_index]
 
     def _configure_intrinsics(self, args) -> None:
-        """Configure network intrinsics based on arguments."""
-        # Override intrinsics from args
         for key, value in vars(args).items():
             if key == 'labels' and value is not None:
                 with open(value, 'r') as f:
@@ -152,22 +155,18 @@ class IMX500Detector:
         self.intrinsics.update_with_defaults()
 
     def _setup_camera(self, args) -> None:
-        """Setup camera configuration."""
         self.picam2 = Picamera2(self.imx500.camera_num)
         config = self.picam2.create_preview_configuration(
             controls={"FrameRate": self.intrinsics.inference_rate},
             buffer_count=12
         )
-        
         self.imx500.show_network_fw_progress_bar()
         self.picam2.start(config, show_preview=True)
-
         if self.intrinsics.preserve_aspect_ratio:
             self.imx500.set_auto_aspect_ratio()
 
     @lru_cache
     def get_labels(self) -> List[str]:
-        """Get cached list of labels."""
         labels = self.intrinsics.labels
         if self.intrinsics.ignore_dash_labels:
             labels = [label for label in labels if label and label != "-"]
@@ -176,7 +175,6 @@ class IMX500Detector:
     def process_standard_output(self, np_outputs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         input_w, input_h = self.imx500.get_input_size()
         boxes, scores, classes = np_outputs[0][0], np_outputs[2][0], np_outputs[1][0]
-        
         if self.intrinsics.bbox_normalization:
             boxes = boxes / input_h
 
@@ -192,17 +190,19 @@ class IMX500Detector:
         np_outputs = self.imx500.get_outputs(metadata, add_batch=True)
         if np_outputs is None:
             return []
-
         boxes, scores, classes = self.process_standard_output(np_outputs)
-
-        # Create detections
         detections = [
             Detection(int(category), score, 
-                     self.imx500.convert_inference_coords(box, metadata, self.picam2))
+                    self.imx500.convert_inference_coords(box, metadata, self.picam2))
             for box, score, category in zip(boxes, scores, classes)
-            if score > threshold
+            if score > threshold 
+            and self._is_point_in_region(
+                self._get_center(
+                    self.imx500.convert_inference_coords(box, metadata, self.picam2)
+                ),
+                self.detection_region
+            )
         ]
-
         # Update tracking
         if not detections:
             tracked_objects = self.tracker.update(np.empty((0, 4)))
@@ -211,8 +211,6 @@ class IMX500Detector:
         tracked_objects = self.tracker.update(
             np.array([d.bbox_for_sort for d in detections])
         )
-
-        # Update detections with tracking info
         tracked_detections = []
         for detection, track in zip(detections[:len(tracked_objects)], tracked_objects):
             x_min, y_min, x_max, y_max, track_id = track
@@ -242,6 +240,14 @@ class IMX500Detector:
 
         labels = self.get_labels()
         with MappedArray(request, "main") as m:
+            # draw detection region
+            b_x, b_y, b_w, b_h = self.detection_region
+            color = (255, 255, 0)  # Yellow
+            cv2.putText(m.array, "Detection Region", (b_x + 5, b_y + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.rectangle(m.array, (b_x, b_y),
+                        (b_x + b_w, b_y + b_h), (255, 255, 0, 0))
+            
             if self.conveyor_speed and self.conveyor_speed > 1:
                 speed_text = f"Conveyor Speed: {abs(self.conveyor_speed):.2f} mm/s"
                 cv2.putText(m.array, speed_text, (10, 30),
@@ -277,7 +283,6 @@ class IMX500Detector:
                 cv2.putText(m.array, label, (text_x, text_y),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
                 cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), 2)
-
             # Draw ROI if needed
             if self.intrinsics.preserve_aspect_ratio:
                 b_x, b_y, b_w, b_h = self.imx500.get_roi_scaled(request)
@@ -301,13 +306,13 @@ class IMX500Detector:
                     "y": y,
                     "w": w,
                     "h": h,
+                    "speed": int(self.conveyor_speed),
                 }
                 bbox_queue.put(bbox_data)
                 self.processed_ids.add(detection.tracking_id)
                 print(f"Added to bbox_queue: {bbox_data}")
 
 def detection_process(bbox_queue, results_queue, args):
-
     detector = IMX500Detector(args)
     detector.picam2.pre_callback = lambda req: detector.draw_detections(req, results_queue)
     while True:
