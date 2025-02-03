@@ -25,4 +25,8 @@ git clone https://github.com/abewley/sort.git
 cd sort
 cp sort.py ..
 cd ..
+
+# Remove temp folder
+echo "Deleteing temp folders..."
+sudo rm -rf sort filterpy
 echo "Setup complete!"
