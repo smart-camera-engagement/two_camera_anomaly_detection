@@ -3,13 +3,14 @@ Description   : This script designed to perform object detection + tracking
 Author        : Fang Du
 Email         : fang.du@sony.com
 Date Created  : 2025-01-30
-Date Modified : 2025-01-30
-Version       : 1.1
+Date Modified : 2025-02-11
+Version       : 1.2
 Python Version: 3.11
 License       : © 2025 - Sony Semiconductor Solution America
 History       :
               : 1.0 - 2025-01-30 Create Script
               : 1.1 - 2025-02-02 Add detection region
+              : 1.2 - 2025-02-11 bug fix, improve the display
 
 """
 
@@ -46,30 +47,26 @@ class IMX500Detector:
         if not self.intrinsics:
             self.intrinsics = NetworkIntrinsics()
             self.intrinsics.task = "object detection"
-
         self.tracker = Sort(
             max_age=args.max_disappeared,
             min_hits=3,
             iou_threshold=args.iou
         )
-        
         self._configure_intrinsics(args)
+        self.picam2 = Picamera2(self.imx500.camera_num)
         self._setup_camera(args)
+
+        self.pixels_per_mm = args.pixels_per_mm  # Conversion factor
+        self.detection_region = args.detection_region
+
         self.last_results = None
-        
-        # Track processed IDs
         self.processed_ids: Set[int] = set()
         self.anomaly_results = {}
         self.previous_positions = {}  # Store previous positions
-        self.pixels_per_mm = args.pixels_per_mm  # Conversion factor
-
-        # Conveyor belt speed
         self.prev_time = 0
         self.conveyor_speed = 0.0    # Current estimated conveyor speed
         self.speed_history = []
         self.history_window = 10     # Number of frames to average speed over
-
-        self.detection_region = args.detection_region
 
     def estimate_conveyor_speed(self, detections: List[Detection], current_time: float) -> None:
         dt = current_time - self.prev_time
@@ -155,7 +152,6 @@ class IMX500Detector:
         self.intrinsics.update_with_defaults()
 
     def _setup_camera(self, args) -> None:
-        self.picam2 = Picamera2(self.imx500.camera_num)
         config = self.picam2.create_preview_configuration(
             controls={"FrameRate": self.intrinsics.inference_rate},
             buffer_count=12
@@ -232,12 +228,10 @@ class IMX500Detector:
     def draw_detections(self, request, results_queue) -> None:
         if self.last_results is None:
             return
-
-        # Get all available classification results
+        
         while not results_queue.empty():
             result = results_queue.get()
             self.anomaly_results[result["id"]] = result["is_anomaly"]
-
         labels = self.get_labels()
         with MappedArray(request, "main") as m:
             # draw detection region
@@ -258,11 +252,12 @@ class IMX500Detector:
                 label = f"ID:{detection.tracking_id}-{labels[detection.category]}({detection.conf:.2f})"
 
                 # Add classification result if available
+                bbox_color = (255, 255, 0, 0)
                 if detection.tracking_id in self.anomaly_results:
                     if not self.anomaly_results[detection.tracking_id]:
-                        label += f" - N"
+                        bbox_color = (0, 255, 0, 0) # green for normal pill
                     else:
-                        label += f" - A"
+                        bbox_color = (255, 0, 0, 0) # red for abnormal pill
 
                 # Draw text background
                 (text_width, text_height), baseline = cv2.getTextSize(
@@ -281,8 +276,8 @@ class IMX500Detector:
 
                 # Draw text and box
                 cv2.putText(m.array, label, (text_x, text_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
-                cv2.rectangle(m.array, (x, y), (x + w, y + h), (0, 255, 0, 0), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, bbox_color, 2)
+                cv2.rectangle(m.array, (x, y), (x + w, y + h), bbox_color, 2)
             # Draw ROI if needed
             if self.intrinsics.preserve_aspect_ratio:
                 b_x, b_y, b_w, b_h = self.imx500.get_roi_scaled(request)

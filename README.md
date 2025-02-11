@@ -3,16 +3,16 @@
 ## About
 This document describes the demo setup for a dual-camera pill anomaly detection system. The two cameras function as follows:
 1. Cam1 (Pill Detection): 
-   - Detects pills and sends bounding box coordinates to Cam2.
+   - Detects pills and sends detected bounding box coordinates to Cam2.
    - Waits for Cam2 to send back anomaly detection results for display.
 2. Cam2 (Anomaly Detection): 
     - Receives the bounding box coordinates from Cam1.
-    - Performs anomaly detection on the detected pill.
+    - Performs anomaly detection on the detected pill one by one.
     - Sends the anomaly detection results back to Cam1.
 
 ## Hardware Spec
 1. Raspberry Pi 5
-2. Two Rapsberry Pi Ai Camera - Those two camera mount side by side, distance is 40mm. The distance between camera to pill is ~20cm.
+2. Two Rapsberry Pi Ai Camera - Those two camera mount side by side, distance is 40mm. The distance between camera to pill is ~200mm.
 <p align="center">
 <image src="./images/two_camera_setup.png" alt="two_camera_setup" width="500">
 </p>
@@ -61,9 +61,22 @@ This document describes the demo setup for a dual-camera pill anomaly detection 
 <image src="./images/data_flow.png" alt="data_flow" width="700">
 </p>
 
-## Time Sequence
+## System Level Time Sequence
 <p align="center">
 <image src="./images/time_sequence.png" alt="data_flow" width="700">
+</p>
+
+## Anomaly Detection Time Sequence
+This code only supports Cam 2 running at 30 FPS or below 20 FPS. Any other FPS is not supported.
+
+### Cam2 run at <=20FPS
+<p align="center">
+<image src="./images/time_sequence_20fps.png" alt="data_flow" width="700">
+</p>
+
+### Cam2 run at 30FPS
+<p align="center">
+<image src="./images/time_sequence_30fps.png" alt="data_flow" width="700">
 </p>
 
 ## Reference

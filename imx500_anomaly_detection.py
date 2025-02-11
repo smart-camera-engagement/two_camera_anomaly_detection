@@ -3,14 +3,15 @@ Description   : This script designed to perform pill anormly detection
 Author        : Fang Du
 Email         : fang.du@sony.com
 Date Created  : 2025-01-30
-Date Modified : 2025-02-02
-Version       : 1.2
+Date Modified : 2025-02-11
+Version       : 1.3
 Python Version: 3.11
 License       : © 2025 - Sony Semiconductor Solution America
 History       :
               : 1.0 - 2025-01-30 Create Script
               : 1.1 - 2025-01-31 Modified to three-frame cycle
               : 1.2 - 2025-02-02 Add frame number, calculate ROI based on speed, improve three-frame cycle
+              : 1.3 - 2025-02-11 Improve the process as a moving window, support 30 FPS
 """
 
 import time
@@ -28,28 +29,35 @@ class AnomalyResult:
     pixel_scores: np.ndarray
     mask: np.ndarray
 
+@dataclass
+class ROIState:
+    bbox_id: int
+    roi: Tuple[int, int, int, int]  # x, y, w, h
+    detection_time: float
+    set_frame: int
+
 class IMX500AnomalyDetector:
     def __init__(self, args):
         self.camera_path = self._select_camera(args.camera_index)
         self.imx500 = IMX500(network_file=args.model, camera_id=self.camera_path)
-        
-        # Store thresholds from arguments
+        self.picam2 = Picamera2(self.imx500.camera_num)
+        self._setup_camera(args)
+
         self.image_threshold = args.image_threshold
         self.pixel_threshold = args.pixel_threshold
         self.constant_offset = args.constant_offset_in_pixel
         self.roi_box_size = args.roi_box_size
         self.pixels_per_mm = args.pixels_per_mm
-        
-        # Initialize Picamera
-        self.picam2 = Picamera2(self.imx500.camera_num)
-        self._setup_camera(args)
-
-        self.frame_state = 0
-        self.current_bbox_id = None
-        self.processed_bbox_ids = set()
-        self.detection_time = None
+        self.fps = args.fps
 
         self.frame_count = 0
+        self.roi_settings = {}
+        self.processed_bbox_ids = set()
+
+        # Determine frames to wait based on FPS
+        self.frames_to_wait = 3 if self.fps == 30 else 2 if self.fps <= 20 else None
+        if self.frames_to_wait is None:
+            raise ValueError("FPS must be either 30 or <= 20")
 
     def _select_camera(self, camera_index: int) -> str:
         cameras = [
@@ -91,7 +99,7 @@ class IMX500AnomalyDetector:
         scaled_y = max(0, scaled_y)
         return (scaled_x, scaled_y, scaled_w, scaled_h)
 
-    def process_anomaly_results(self, request: CompletedRequest) -> Optional[AnomalyResult]:
+    def process_anomaly_results(self, request: CompletedRequest, bbox_id: int) -> Optional[AnomalyResult]:
         raw_outputs = self.imx500.get_outputs(request.get_metadata())
         if raw_outputs is None:
             print("Warning: Model output is None.")
@@ -100,10 +108,10 @@ class IMX500AnomalyDetector:
         image_score = np_output[0, 0, 1]
         pixel_scores = np_output[:, :, 0]
         mask = np.zeros(pixel_scores.shape + (4,), dtype=np.uint8)
-        mask[pixel_scores >= self.pixel_threshold, 0] = 255  # Red channel
-        mask[pixel_scores >= self.pixel_threshold, 3] = 150  # Alpha channel
+        mask[pixel_scores >= self.pixel_threshold, 0] = 255
+        mask[pixel_scores >= self.pixel_threshold, 3] = 150
         return AnomalyResult(
-            bbox_id=self.current_bbox_id,
+            bbox_id=bbox_id,
             image_score=image_score,
             pixel_scores=pixel_scores,
             mask=mask
@@ -150,6 +158,7 @@ class IMX500AnomalyDetector:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.rectangle(m.array, (b_x, b_y),
                         (b_x + b_w, b_y + b_h), (255, 255, 0, 0))
+        return b_x, b_y, b_w, b_h
 
     def draw_frame_number(self, request: CompletedRequest, stream: str = "main") -> None:
         with MappedArray(request, stream) as m:
@@ -158,66 +167,82 @@ class IMX500AnomalyDetector:
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)  # Green color
     
     def process_frame(self, request: CompletedRequest, bbox_queue, results_queue) -> None:
-
-        self.draw_frame_number(request)
+        """
+        Process each frame:
+        1. Set new ROI from bbox_queue (if available)
+        2. Get results for ROI set N frames ago (where N depends on FPS)
+        """
         self.frame_count += 1
+        self.draw_frame_number(request)
+        self.draw_roi(request)
+
         try:
-            if self.frame_state == 0:  # setting ROI
-                # testing code
-                # bbox = {
-                #     'x': 400,
-                #     'y': 250,
-                #     'w': 60,
-                #     'h': 60,
-                #     'id': 1,
-                #     'time': time.time(),
-                #     'speed': 5
-                # }
-                # bbox_id = bbox["id"]
-                # scaled_bbox = self.scale_bbox_to_detection(
-                #         (bbox['x'], bbox['y'], bbox['w'], bbox['h'], bbox['time'], bbox['speed']),
-                #         scale_x=6.3375,
-                #         scale_y=6.3333
-                #     )
-                # self.imx500.set_inference_roi_abs(scaled_bbox)
-                # self.current_bbox_id = bbox_id
+            # get the anormly detection results
+            result_frame = self.frame_count - self.frames_to_wait
+            if result_frame in self.roi_settings:
+                roi_state = self.roi_settings[result_frame]
+                results = self.process_anomaly_results(request, roi_state.bbox_id)
+                if results:
+                    result_dict = {
+                        "id": roi_state.bbox_id,
+                        "is_anomaly": results.image_score > self.image_threshold,
+                        "anomaly_score": results.image_score,
+                    }
+                    results_queue.put(result_dict)
+                    self.draw_anomaly_results(request, results)
+                    self.processed_bbox_ids.add(roi_state.bbox_id)
+                    print(f"Added to results_queue: {result_dict}")
+                
+                del self.roi_settings[result_frame]
+            
+            # set ROI
+            if not bbox_queue.empty():
+                bbox = bbox_queue.get()
+                bbox_id = bbox["id"]
+                
+                if bbox_id not in self.processed_bbox_ids:
+                    scaled_bbox = self.scale_bbox_to_detection(
+                        (bbox['x'], bbox['y'], bbox['w'], bbox['h'],
+                        bbox['time'], bbox['speed']),
+                        scale_x=6.3375,
+                        scale_y=6.3333
+                    )
+                    self.imx500.set_inference_roi_abs(scaled_bbox)
+                    
+                    self.roi_settings[self.frame_count] = ROIState(
+                        bbox_id=bbox_id,
+                        roi=scaled_bbox,
+                        detection_time=bbox['time'],
+                        set_frame=self.frame_count
+                    )
 
-                if not bbox_queue.empty():
-                    bbox = bbox_queue.get()
-                    bbox_id = bbox["id"]
-                    if bbox_id not in self.processed_bbox_ids:
-                        scaled_bbox = self.scale_bbox_to_detection(
-                            (bbox['x'], bbox['y'], bbox['w'], bbox['h'], bbox['time'], bbox['speed']),
-                            scale_x=6.3375,
-                            scale_y=6.3333
-                        )
-                        self.imx500.set_inference_roi_abs(scaled_bbox)
-                        self.current_bbox_id = bbox_id
-                        self.frame_state = 1
-                        self.detection_time = bbox['time']
-                    else:
-                        print(f"Skipping already processed bbox ID: {bbox_id}")
-            elif self.frame_state == 1: # wait
-                self.draw_roi(request)
-                self.frame_state = 2
-            else: # anormaly detection
-                if self.current_bbox_id is not None:
-                    results = self.process_anomaly_results(request)
-                    if results:
-                        result_dict = {
-                            "id": results.bbox_id,
-                            "is_anomaly": results.image_score > self.image_threshold,
-                            "anomaly_score": results.image_score,
-                        }
-                        results_queue.put(result_dict)
-                        print(f"Added to results_queue: {result_dict}")
-                        self.draw_anomaly_results(request, results)
-                        self.processed_bbox_ids.add(self.current_bbox_id)
-                        self.current_bbox_id = None
-                self.frame_state = 0
+            old_frames = [f for f in self.roi_settings.keys() 
+                        if f < self.frame_count - self.frames_to_wait - 10]
+            for f in old_frames:
+                del self.roi_settings[f]
+
         except Exception as e:
-            print(f"Error in process_frame: {e}")
+            print(f"Frame {self.frame_count}: Error in process_frame: {e}")
+            import traceback
+            traceback.print_exc()
 
+    def test_set_roi(self):
+        bbox = {
+            'x': 400,
+            'y': 250,
+            'w': 60,
+            'h': 60,
+            'id': 1,
+            'time': time.time(),
+            'speed': 5
+        }
+        scaled_bbox = self.scale_bbox_to_detection(
+                (bbox['x'], bbox['y'], bbox['w'], bbox['h'], bbox['time'], bbox['speed']),
+                scale_x=6.3375,
+                scale_y=6.3333
+            )
+        self.imx500.set_inference_roi_abs(scaled_bbox)
+        
 def anomaly_process(bbox_queue, results_queue, args):
     detector = IMX500AnomalyDetector(args)
     detector.picam2.pre_callback = lambda req: detector.process_frame(

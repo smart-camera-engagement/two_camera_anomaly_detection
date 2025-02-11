@@ -3,13 +3,14 @@ Description   : This script designed to perform simultaneous object detection an
 Author        : Fang Du
 Email         : fang.du@sony.com
 Date Created  : 2025-01-30
-Date Modified : 2025-02-02
-Version       : 1.0
+Date Modified : 2025-02-11
+Version       : 1.2
 Python Version: 3.11
 License       : © 2025 - Sony Semiconductor Solution America
 History       :
               : 1.0 - 2025-01-30 Create Script
               : 1.1 - 2025-02-02 Add global variables
+              : 1.2 - 2025-02-11 Adjust camera distance pixel
 """
 
 import argparse
@@ -20,12 +21,12 @@ from imx500_anomaly_detection import anomaly_process
 if __name__ == "__main__":
 
     CAMERA_DISTANCE_MM = 40  # Physical distance between cameras in mm
-    CAMERA_DISTANCE_PIXELS = 210  # Distance in pixels
+    CAMERA_DISTANCE_PIXELS = 160  # Distance in pixels
     PIXELS_PER_MM = CAMERA_DISTANCE_PIXELS / CAMERA_DISTANCE_MM
     DETECTION_REGION = [20, 70, 600, 410]
 
     bbox_queue = Queue(maxsize=50)  # Queue for passing bounding boxes
-    results_queue = Queue()  # Queue for receiving classification results
+    results_queue = Queue()         # Queue for receiving classification results
 
     pill_detection_args = argparse.Namespace(
         model="./Models/Detection/network.rpk", 
@@ -43,7 +44,7 @@ if __name__ == "__main__":
     anomaly_detection_args = argparse.Namespace(
         model="./Models/Anomaly/network.rpk",
         camera_index=1,
-        fps=20,
+        fps=30,
         image_threshold=0.45,
         pixel_threshold=0.30,
         constant_offset_in_pixel=CAMERA_DISTANCE_PIXELS,
