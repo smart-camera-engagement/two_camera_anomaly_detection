@@ -174,7 +174,6 @@ class IMX500AnomalyDetector:
         """
         self.frame_count += 1
         self.draw_frame_number(request)
-        self.draw_roi(request)
 
         try:
             # get the anormly detection results
